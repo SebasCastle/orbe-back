@@ -17,6 +17,16 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import se.michaelthelin.spotify.SpotifyApi;
+import se.michaelthelin.spotify.SpotifyHttpManager;
+import se.michaelthelin.spotify.exceptions.SpotifyWebApiException;
+import se.michaelthelin.spotify.exceptions.detailed.BadGatewayException;
+import se.michaelthelin.spotify.exceptions.detailed.BadRequestException;
+import se.michaelthelin.spotify.exceptions.detailed.ForbiddenException;
+import se.michaelthelin.spotify.exceptions.detailed.InternalServerErrorException;
+import se.michaelthelin.spotify.exceptions.detailed.NotFoundException;
+import se.michaelthelin.spotify.exceptions.detailed.ServiceUnavailableException;
+import se.michaelthelin.spotify.exceptions.detailed.TooManyRequestsException;
+import se.michaelthelin.spotify.exceptions.detailed.UnauthorizedException;
 import se.michaelthelin.spotify.model_objects.credentials.AuthorizationCodeCredentials;
 import se.michaelthelin.spotify.model_objects.specification.ArtistSimplified;
 import se.michaelthelin.spotify.model_objects.specification.Image;
@@ -25,11 +35,14 @@ import se.michaelthelin.spotify.model_objects.specification.SavedAlbum;
 import se.michaelthelin.spotify.model_objects.specification.Track;
 import se.michaelthelin.spotify.model_objects.specification.User;
 
+import java.lang.reflect.Method;
 import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -40,7 +53,7 @@ import java.util.stream.Collectors;
 public class SpotifyService {
 
 	private static final Logger log = LoggerFactory.getLogger(SpotifyService.class);
-	private static final String SCOPES = "user-read-private user-read-email user-library-read user-top-read";
+	private static final String SCOPES = "user-read-private user-library-read user-top-read";
 	private static final Set<String> RANGES = Set.of("short_term", "medium_term", "long_term");
 
 	private final OrbeProperties properties;
@@ -60,7 +73,7 @@ public class SpotifyService {
 		String state = UUID.randomUUID().toString();
 		states.put(state, new Pending(Instant.now().plus(Duration.ofMinutes(10)), ownerId));
 		SpotifyApi api = newApi();
-		URI uri = execute(() -> api.authorizationCodeUri()
+		URI uri = execute("GET /authorize (authorization URL)", () -> api.authorizationCodeUri()
 				.scope(SCOPES)
 				.show_dialog(true)
 				.state(state)
@@ -74,18 +87,19 @@ public class SpotifyService {
 		Long ownerId = consumeState(state);
 		ensureConfigured();
 		SpotifyApi api = newApi();
-		AuthorizationCodeCredentials credentials = execute(() -> api.authorizationCode(code).build().execute());
+		AuthorizationCodeCredentials credentials = execute(
+				"POST /api/token (authorization code)",
+				() -> api.authorizationCode(code).build().execute()
+		);
 		api.setAccessToken(credentials.getAccessToken());
 		if (credentials.getRefreshToken() != null) {
 			api.setRefreshToken(credentials.getRefreshToken());
 		}
-		User user = execute(() -> api.getCurrentUsersProfile().build().execute());
+		User user = execute("GET /v1/me (OAuth callback)", () -> api.getCurrentUsersProfile().build().execute());
 		SpotifyAccount account = accounts.findByRefId(user.getId()).orElseGet(SpotifyAccount::new);
 		account.setRefId(user.getId());
 		account.setDisplayName(user.getDisplayName());
-		account.setEmail(user.getEmail());
 		account.setImageUrl(image(user.getImages()));
-		account.setProduct(productName(user.getProduct()));
 		account.setAccessToken(credentials.getAccessToken());
 		if (!Texts.blank(credentials.getRefreshToken())) {
 			account.setRefreshToken(credentials.getRefreshToken());
@@ -105,11 +119,9 @@ public class SpotifyService {
 	public SpotifyProfile profile(String userId) {
 		SpotifyAccount account = requireOwned(userId);
 		SpotifyApi api = authorized(account);
-		User user = execute(() -> api.getCurrentUsersProfile().build().execute());
+		User user = execute("GET /v1/me", () -> api.getCurrentUsersProfile().build().execute());
 		account.setDisplayName(user.getDisplayName());
-		account.setEmail(user.getEmail());
 		account.setImageUrl(image(user.getImages()));
-		account.setProduct(productName(user.getProduct()));
 		accounts.save(account);
 		return profileOf(account);
 	}
@@ -118,7 +130,7 @@ public class SpotifyService {
 	public AlbumPage albums(String userId, int offset) {
 		SpotifyAccount account = requireOwned(userId);
 		SpotifyApi api = authorized(account);
-		Paging<SavedAlbum> paging = execute(() -> api.getCurrentUsersSavedAlbums()
+		Paging<SavedAlbum> paging = execute("GET /v1/me/albums", () -> api.getUsersSavedAlbums()
 				.limit(24)
 				.offset(offset)
 				.build()
@@ -153,7 +165,7 @@ public class SpotifyService {
 		}
 		SpotifyAccount account = requireOwned(userId);
 		SpotifyApi api = authorized(account);
-		Paging<Track> paging = execute(() -> api.getUsersTopTracks()
+		Paging<Track> paging = execute("GET /v1/me/top/tracks", () -> api.getUsersTopTracks()
 				.time_range(range)
 				.limit(10)
 				.offset(0)
@@ -176,7 +188,7 @@ public class SpotifyService {
 					albumName,
 					imageUrl,
 					track.getDurationMs() == null ? 0 : track.getDurationMs(),
-					track.getPopularity() == null ? 0 : track.getPopularity(),
+					null,
 					track.getPreviewUrl(),
 					track.getId() == null ? null : "https://open.spotify.com/track/" + track.getId()
 			));
@@ -200,7 +212,10 @@ public class SpotifyService {
 				throw new ApiException(HttpStatus.UNAUTHORIZED, "La sesión de Spotify expiró. Conéctala de nuevo.");
 			}
 			api.setRefreshToken(account.getRefreshToken());
-			AuthorizationCodeCredentials credentials = execute(() -> api.authorizationCodeRefresh().build().execute());
+				AuthorizationCodeCredentials credentials = execute(
+						"POST /api/token (refresh token)",
+						() -> api.authorizationCodeRefresh().build().execute()
+				);
 			account.setAccessToken(credentials.getAccessToken());
 			if (!Texts.blank(credentials.getRefreshToken())) {
 				account.setRefreshToken(credentials.getRefreshToken());
@@ -259,6 +274,7 @@ public class SpotifyService {
 	private SpotifyApi newApi() {
 		ensureConfigured();
 		return new SpotifyApi.Builder()
+				.setHttpManager(new SpotifyHttpManager.Builder().build())
 				.setClientId(properties.spotify().clientId().trim())
 				.setClientSecret(properties.spotify().clientSecret().trim())
 				.setRedirectUri(URI.create(properties.spotify().redirectUri().trim()))
@@ -284,9 +300,9 @@ public class SpotifyService {
 		return new SpotifyProfile(
 				account.getRefId(),
 				account.getDisplayName(),
-				account.getEmail(),
+				null,
 				account.getImageUrl(),
-				account.getProduct()
+				null
 		);
 	}
 
@@ -308,10 +324,6 @@ public class SpotifyService {
 		return album.getTracks().getTotal();
 	}
 
-	private String productName(Object product) {
-		return product == null ? null : product.toString().toLowerCase(java.util.Locale.ROOT);
-	}
-
 	private String image(Image[] images) {
 		if (images == null) {
 			return null;
@@ -324,15 +336,122 @@ public class SpotifyService {
 		return null;
 	}
 
-	private <T> T execute(SpotifyCall<T> call) {
+	private <T> T execute(String operation, SpotifyCall<T> call) {
 		try {
 			return call.run();
 		} catch (ApiException exception) {
+			logDiagnostic(operation, exception);
 			throw exception;
 		} catch (Exception exception) {
-			log.warn("Falló una llamada a Spotify: {}", exception.getClass().getSimpleName());
-			throw new ApiException(HttpStatus.BAD_GATEWAY, "Spotify no respondió. Vuelve a conectar tu cuenta.");
+			logDiagnostic(operation, exception);
+			HttpStatus status = actualHttpStatus(exception).orElse(HttpStatus.BAD_GATEWAY);
+			ApiException apiException = new ApiException(status, spotifyMessage(status));
+			apiException.initCause(exception);
+			throw apiException;
 		}
+	}
+
+	private java.util.Optional<HttpStatus> actualHttpStatus(Throwable exception) {
+		for (Throwable current : causeChain(exception)) {
+			if (current instanceof ApiException apiException) {
+				return java.util.Optional.of(apiException.status());
+			}
+			Integer status = statusFromAccessor(current);
+			if (status == null) {
+				status = statusFromMessage(current.getMessage());
+			}
+			if (status != null) {
+				HttpStatus resolved = HttpStatus.resolve(status);
+				if (resolved != null) return java.util.Optional.of(resolved);
+			}
+			if (current instanceof SpotifyWebApiException) {
+				HttpStatus sdkStatus = spotifySdkStatus(current);
+				if (sdkStatus != null) return java.util.Optional.of(sdkStatus);
+			}
+		}
+		return java.util.Optional.empty();
+	}
+
+	private Integer statusFromAccessor(Throwable exception) {
+		for (String methodName : List.of("getStatusCode", "getStatus", "statusCode", "status")) {
+			try {
+				Method method = exception.getClass().getMethod(methodName);
+				Object value = method.invoke(exception);
+				if (value instanceof Number number) return number.intValue();
+				if (value instanceof HttpStatus status) return status.value();
+				if (value instanceof org.springframework.http.HttpStatusCode status) return status.value();
+			} catch (ReflectiveOperationException ignored) {
+				// This exception type does not expose an HTTP status through this accessor.
+			}
+		}
+		return null;
+	}
+
+	private Integer statusFromMessage(String message) {
+		if (message == null) return null;
+		java.util.regex.Matcher matcher = java.util.regex.Pattern
+				.compile("(?i)(?:HTTP(?:/\\d(?:\\.\\d)?)?\\s+|status(?:\\s*code)?\\s*[:=]\\s*|\\[)([1-5]\\d{2})(?:\\]|\\b)")
+				.matcher(message);
+		return matcher.find() ? Integer.valueOf(matcher.group(1)) : null;
+	}
+
+	private HttpStatus spotifySdkStatus(Throwable exception) {
+		if (exception instanceof BadRequestException) return HttpStatus.BAD_REQUEST;
+		if (exception instanceof UnauthorizedException) return HttpStatus.UNAUTHORIZED;
+		if (exception instanceof ForbiddenException) return HttpStatus.FORBIDDEN;
+		if (exception instanceof NotFoundException) return HttpStatus.NOT_FOUND;
+		if (exception instanceof TooManyRequestsException) return HttpStatus.TOO_MANY_REQUESTS;
+		if (exception instanceof InternalServerErrorException) return HttpStatus.INTERNAL_SERVER_ERROR;
+		if (exception instanceof BadGatewayException) return HttpStatus.BAD_GATEWAY;
+		if (exception instanceof ServiceUnavailableException) return HttpStatus.SERVICE_UNAVAILABLE;
+		return null;
+	}
+
+	private List<Throwable> causeChain(Throwable exception) {
+		List<Throwable> chain = new ArrayList<>();
+		Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+		Throwable current = exception;
+		while (current != null && seen.add(current) && chain.size() < 12) {
+			chain.add(current);
+			current = current.getCause();
+		}
+		return chain;
+	}
+
+	private void logDiagnostic(String operation, Throwable exception) {
+		StringBuilder diagnostic = new StringBuilder("Spotify operation=").append(operation);
+		for (Throwable cause : causeChain(exception)) {
+			diagnostic.append(" | exception=").append(cause.getClass().getName())
+					.append(" message=").append(redact(cause.getMessage()));
+			Integer status = statusFromAccessor(cause);
+			if (status == null) status = statusFromMessage(cause.getMessage());
+			if (status != null) diagnostic.append(" httpStatus=").append(status);
+			else if (cause instanceof SpotifyWebApiException) {
+				HttpStatus sdkStatus = spotifySdkStatus(cause);
+				diagnostic.append(" httpStatus=").append(sdkStatus == null ? "unavailable" : sdkStatus.value());
+			}
+		}
+		log.error("{}", diagnostic);
+	}
+
+	private String redact(String value) {
+		if (value == null) return "<no message>";
+		return value
+				.replaceAll("(?i)(authorization\\s*:\\s*bearer\\s+)[^\\s,;\\\"']+", "$1[REDACTED]")
+				.replaceAll("(?i)([\\\"']?(?:access_token|refresh_token|client_secret|client_id|authorization_code|code|token)[\\\"']?\\s*[:=]\\s*[\\\"']?)[^\\\"',&\\s}]+", "$1[REDACTED]");
+	}
+
+	private String spotifyMessage(HttpStatus status) {
+		return switch (status.value()) {
+			case 400 -> "La solicitud a Spotify no es válida.";
+			case 401 -> "Tu autorización de Spotify expiró. Vuelve a conectar tu cuenta.";
+			case 403 -> "Esta cuenta de Spotify no está autorizada para esta demo.";
+			case 404 -> "El recurso de Spotify no fue encontrado.";
+			case 429 -> "Spotify está limitando temporalmente las solicitudes. Intenta nuevamente.";
+			default -> status.is5xxServerError()
+					? "Spotify está teniendo problemas temporalmente. Intenta nuevamente."
+					: "No se pudo completar la solicitud a Spotify.";
+		};
 	}
 
 	@FunctionalInterface

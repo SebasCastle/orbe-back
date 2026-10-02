@@ -39,6 +39,7 @@ com\orbe\common\Texts.class
 com\orbe\starwars\swapi\FilmSnapshot.class
 com\orbe\cinema\omdb\OmdbModels.class
 com\orbe\social\repository\RatingRepository$RatingSummary.class
+com\orbe\common\GlobalExceptionHandler$SpotifyErrorResponse.class
 com\orbe\auth\dto\AuthDtos.class
 com\orbe\cinema\omdb\OmdbModels$OmdbTitle.class
 com\orbe\social\model\PostLike.class

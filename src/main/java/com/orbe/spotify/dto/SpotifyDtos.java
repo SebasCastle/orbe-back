@@ -40,7 +40,7 @@ public final class SpotifyDtos {
 			String albumName,
 			String imageUrl,
 			int durationMs,
-			int popularity,
+			Integer popularity,
 			String previewUrl,
 			String externalUrl
 	) {

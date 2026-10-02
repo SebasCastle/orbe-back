@@ -11,6 +11,7 @@ import com.orbe.spotify.service.SpotifyService;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -51,16 +52,19 @@ public class SpotifyController {
 			HttpServletResponse response
 	) throws IOException {
 		if (error != null || code == null || code.isBlank()) {
-			response.sendRedirect(redirectError("Spotify canceló la autorización."));
+			response.sendRedirect(redirectError(
+					"access_denied".equals(error) ? HttpStatus.FORBIDDEN : HttpStatus.BAD_REQUEST,
+					"access_denied".equals(error) ? "SPOTIFY_ACCESS_DENIED" : "SPOTIFY_BAD_REQUEST"
+			));
 			return;
 		}
 		try {
 			SpotifyProfile profile = spotify.connect(code, state);
 			response.sendRedirect(frontend("/spotify?userId=" + encode(profile.id())));
 		} catch (ApiException exception) {
-			response.sendRedirect(redirectError(exception.getMessage()));
+			response.sendRedirect(redirectError(exception.status(), errorCode(exception.status())));
 		} catch (RuntimeException exception) {
-			response.sendRedirect(redirectError("No se pudo conectar con Spotify."));
+			response.sendRedirect(redirectError(HttpStatus.BAD_GATEWAY, "SPOTIFY_TEMPORARY_ERROR"));
 		}
 	}
 
@@ -91,8 +95,19 @@ public class SpotifyController {
 		return ResponseEntity.noContent().build();
 	}
 
-	private String redirectError(String message) {
-		return frontend("/spotify?error=" + encode(message));
+	private String redirectError(HttpStatus status, String code) {
+		return frontend("/spotify?errorStatus=" + status.value() + "&errorCode=" + encode(code));
+	}
+
+	private String errorCode(HttpStatus status) {
+		return switch (status.value()) {
+			case 400 -> "SPOTIFY_BAD_REQUEST";
+			case 401 -> "SPOTIFY_UNAUTHORIZED";
+			case 403 -> "SPOTIFY_FORBIDDEN";
+			case 404 -> "SPOTIFY_NOT_FOUND";
+			case 429 -> "SPOTIFY_RATE_LIMITED";
+			default -> status.is5xxServerError() ? "SPOTIFY_TEMPORARY_ERROR" : "SPOTIFY_ERROR";
+		};
 	}
 
 	private String frontend(String path) {
