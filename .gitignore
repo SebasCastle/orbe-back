@@ -1,33 +1,22 @@
 # Maven
 target/
-.mvn/wrapper/maven-wrapper.jar
 
-# Java
-*.class
-*.log
-hs_err_pid*
-
-# Spring Boot / configuración local
-.env
-.env.*
-!.env.example
-application-local.yml
-application-local.properties
-
-# Bases de datos locales H2
+# Base de datos local
 data/
 *.mv.db
 *.trace.db
 *.lock.db
 
-# IDEs
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
 .idea/
 .vscode/
 *.iml
-.project
-.classpath
-.settings/
 
-# Sistema operativo
+# OS
 .DS_Store
 Thumbs.db
